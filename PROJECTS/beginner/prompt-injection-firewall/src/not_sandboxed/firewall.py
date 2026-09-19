@@ -227,3 +227,68 @@ def egress_surfaces(reply: AgentReply) -> tuple[str, ...]:
             for value in call.args.values()
         ),
     )
+
+
+from not_sandboxed.layers.pii_vault import PIIVault, PIIVaultLayer
+from not_sandboxed.layers.rag_guard import RagGuardLayer
+from not_sandboxed.layers.crescendo import MultiTurnDriftLayer
+
+
+class AppSecFirewall(Firewall):
+    """
+    Enterprise AppSec-hardened Firewall integrating Zero-Knowledge PII Vaulting,
+    RAG Poisoning Quarantine, and Multi-Turn Crescendo Circuit Breaking.
+    """
+
+    def __init__(
+        self,
+        policy: Policy,
+        registry: Mapping[str, Tool] | None = None,
+        vault: PIIVault | None = None,
+    ) -> None:
+        super().__init__(policy = policy, registry = registry)
+        self.pii_vault_layer = PIIVaultLayer(vault = vault)
+        self.rag_guard_layer = RagGuardLayer()
+        self.crescendo_layer = MultiTurnDriftLayer()
+
+    def inspect_full(
+        self,
+        ctx: Context,
+        session_id: str = "default",
+    ) -> Verdict:
+        verdict = super().inspect(ctx)
+        findings = list(verdict.findings)
+
+        findings.extend(self.pii_vault_layer.inspect(ctx, self.policy))
+        findings.extend(self.rag_guard_layer.inspect(ctx, self.policy))
+        findings.extend(
+            self.crescendo_layer.inspect(
+                ctx,
+                self.policy,
+                session_id = session_id,
+            )
+        )
+
+        findings = escalate(findings, self.policy)
+        return Verdict(
+            decision = decide(findings, self.policy),
+            findings = tuple(findings),
+            policy_id = self.policy.policy_id,
+            elapsed_ms = verdict.elapsed_ms,
+        )
+
+    def inspect_egress(
+        self,
+        reply: AgentReply,
+        ctx: Context,
+    ) -> Verdict:
+        verdict = super().inspect_egress(reply, ctx)
+        findings = list(verdict.findings)
+        findings.extend(self.pii_vault_layer.inspect_reply(reply.text))
+
+        return Verdict(
+            decision = decide(findings, self.policy),
+            findings = tuple(findings),
+            policy_id = self.policy.policy_id,
+            elapsed_ms = verdict.elapsed_ms,
+        )
